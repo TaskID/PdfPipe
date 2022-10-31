@@ -16,6 +16,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Calendar;
 import java.util.TimeZone;
+import java.util.function.Consumer;
 
 public class PdfPipe {
 
@@ -32,7 +33,7 @@ public class PdfPipe {
         options.addOption(Option.builder("s")
             .longOpt("structure")
             .hasArgs()
-            .desc("Document/page structure.\n===== EXAMPLE 1 =====\n-s 1 2\nAll pages of first file, all pages of second file. This is the default behaviour.\n===== EXAMPLE 2 =====\n-s 2:1,3 1:3 3:1-4\nOnly first and third page of second file, only third page of first file, pages 1-4 of third file.\n===== EXAMPLE 3 =====\n-s 1:3,2,4 2 2 3:1,1\nThird, second and fourth page of first file, two times all pages of second file, two times the first page of the third file.\n===== EXAMPLE 4 =====\n-s 2:5 1:5-1,7\nFifth page of second file, pages 5-1 (reverse order) and page 7 of first file.").build());
+            .desc("Document/page structure.\n===== EXAMPLE 1 =====\n-s 1 2\nAll pages of first file, all pages of second file. This is the default behaviour.\n===== EXAMPLE 2 =====\n-s 2:1,3 1:3 3:1-4\nOnly first and third page of second file, only third page of first file, pages 1-4 of third file.\n===== EXAMPLE 3 =====\n-s 1:3,2,4 3 3 2:1,1,1\nThird, second and fourth page of first file, two times all pages of third file, three times the first page of the second file.\n===== EXAMPLE 4 =====\n-s 2:5 1:5-1,7\nFifth page of second file, pages 5-1 (reverse order) and page 7 of first file.").build());
 
         options.addOption(Option.builder("o").required()
             .longOpt("output")
@@ -44,6 +45,12 @@ public class PdfPipe {
             .longOpt("force")
             .numberOfArgs(0)
             .desc("Force creating file, even if output file already exists").build());
+
+        options.addOption(Option.builder("r")
+            .longOpt("rotation")
+            .argName("degrees")
+            .hasArgs()
+            .desc("Page rotation in degrees. Only 0, 90, 180 or 270. Use page numbers of the output file.\n===== EXAMPLE 1 =====\n-r 1:90\nSet rotation of first page to 90 degrees, leave all other pages as they are.\n===== EXAMPLE 2 =====\n-r 1-4,7:180 8-12:270\nSet rotation of pages 1-4 and page 7 to 180 degrees, set rotation of pages 8-12 to 270 degrees, leave all other pages as they are.").build());
 
         options.addOption(Option.builder("t")
             .longOpt("title")
@@ -125,7 +132,7 @@ public class PdfPipe {
                 if (s.contains(":")) {
                     String[] split = s.split(":");
                     if (split.length != 2) {
-                        System.out.println("Invalid data argument: " + s);
+                        System.out.println("Invalid structure argument: " + s);
                         return;
                     }
                     id = split[0];
@@ -148,33 +155,8 @@ public class PdfPipe {
                         outputDocument.addPage(page);
                     }
                 } else {
-                    for (String pageId : pageIds) {
-                        try {
-                            if (!pageId.contains("-")) {
-                                outputDocument.addPage(document.getPage(Integer.parseInt(pageId) - 1));
-                            } else {
-                                String[] split = pageId.split("-");
-                                if (split.length != 2) {
-                                    System.out.println("Invalid range: " + pageId);
-                                    return;
-                                }
-                                int fromPageId = Integer.parseInt(split[0]);
-                                int toPageId = Integer.parseInt(split[1]);
-
-                                if (fromPageId > toPageId) {
-                                    for (int i = fromPageId; i >= toPageId; i--) {
-                                        outputDocument.addPage(document.getPage(i-1));
-                                    }
-                                } else {
-                                    for (int i = fromPageId; i <= toPageId; i++) {
-                                        outputDocument.addPage(document.getPage(i-1));
-                                    }
-                                }
-                            }
-                        } catch (IndexOutOfBoundsException | NumberFormatException e) {
-                            System.out.println("Invalid page index: " + pageId);
-                            return;
-                        }
+                    if(!pageIdLoop(pageIds, i -> outputDocument.addPage(document.getPage(i)))) {
+                        return;
                     }
                 }
             }
@@ -182,6 +164,45 @@ public class PdfPipe {
             for (PDDocument document : inputDocuments) {
                 for (PDPage page : document.getPages()) {
                     outputDocument.addPage(page);
+                }
+            }
+        }
+
+        if (line.hasOption("rotation")) {
+            String[] rotations = line.getOptionValues("rotation");
+            if (rotations.length == 1 && !rotations[0].contains(":")) {
+                try {
+                    int rotation = Integer.parseInt(rotations[0]);
+                    if (!isValidRotation(rotation)) {
+                        return;
+                    }
+                    for (PDPage page : outputDocument.getPages()) {
+                        page.setRotation(rotation);
+                    }
+                } catch (NumberFormatException e) {
+                    System.out.println("Invalid rotation number: " + rotations[0]);
+                    return;
+                }
+            } else {
+                for (String s : rotations) {
+                    try {
+                        String[] argument = s.split(":");
+                        String[] pageIds = argument[0].split(",");
+                        if (pageIds.length == 0) {
+                            System.out.println("Invalid page ids: " + argument[0]);
+                            return;
+                        }
+                        int rotation = Integer.parseInt(argument[1]);
+                        if (!isValidRotation(rotation)) {
+                            return;
+                        }
+                        if(!pageIdLoop(pageIds, i -> outputDocument.getPage(i).setRotation(rotation))) {
+                            return;
+                        }
+                    } catch (IndexOutOfBoundsException | NumberFormatException ex) {
+                        System.out.println("Invalid rotation argument: " + s);
+                        return;
+                    }
                 }
             }
         }
@@ -205,6 +226,47 @@ public class PdfPipe {
         } catch (IOException e) {
             System.out.println("Couldn't close output file: " + e.getMessage());
         }
+    }
+
+    private static boolean isValidRotation(int rotation) {
+        if (rotation % 90 == 0 && rotation >= 0 && rotation < 360) {
+            return true;
+        }
+        System.out.println("Rotation must be 0, 90, 180 or 270. Given value: " + rotation);
+        return false;
+    }
+
+    private static boolean pageIdLoop(String[] pageIds, Consumer<Integer> action) {
+        for (String pageId : pageIds) {
+            try {
+                if (!pageId.contains("-")) {
+                    action.accept(Integer.parseInt(pageId) - 1);
+                } else {
+                    String[] split = pageId.split("-");
+                    if (split.length != 2) {
+                        System.out.println("Invalid range: " + pageId);
+                        return false;
+                    }
+                    int fromPageId = Integer.parseInt(split[0]);
+                    int toPageId = Integer.parseInt(split[1]);
+
+                    if (fromPageId > toPageId) {
+                        for (int i = fromPageId; i >= toPageId; i--) {
+                            action.accept(i-1);
+                        }
+                    } else {
+                        for (int i = fromPageId; i <= toPageId; i++) {
+                            action.accept(i-1);
+                        }
+                    }
+                }
+            } catch (IndexOutOfBoundsException | NumberFormatException e) {
+                e.printStackTrace();
+                System.out.println("Invalid page index: " + pageId);
+                return false;
+            }
+        }
+        return true;
     }
 
 }
